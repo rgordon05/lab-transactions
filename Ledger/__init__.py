@@ -3,7 +3,7 @@ from sqlalchemy.sql import text
 import os
 import logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.WARNING,
     format=f'%(asctime)s.%(msecs)03d - {os.getpid()} - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
 )
@@ -87,36 +87,45 @@ class Ledger:
             This can result in SQL injection vulnerabilities.
         '''
         self.connection.commit()
-        with self.connection.begin():
-            sql = text('LOCK TABLE balances IN EXCLUSIVE MODE;')
-            logging.debug(sql)
-            self.connection.execute(sql)
-            # insert the transaction
-            sql = text(f'INSERT INTO transactions (debit_account_id, credit_account_id, amount) VALUES ({debit_account_id}, {credit_account_id}, {amount});')
-            logging.debug(sql)
-            self.connection.execute(sql)
+        while True:
+            try:
+                with self.connection.begin():
+                    # Table lock replaced by row locks for Task 4.
+                    # sql = text('LOCK TABLE balances IN ACCESS EXCLUSIVE MODE;')
+                    # insert the transaction
+                    sql = text(f'INSERT INTO transactions (debit_account_id, credit_account_id, amount) VALUES ({debit_account_id}, {credit_account_id}, {amount});')
+                    logging.debug(sql)
+                    self.connection.execute(sql)
 
-        # update the debit account balance
-            sql = text(f'SELECT balance FROM balances WHERE account_id = {debit_account_id};')
-            logging.debug(sql)
-            results = self.connection.execute(sql)
-            debit_account_balance = results.first()[0]
+                # update the debit account balance
+                    sql = text(f'SELECT balance FROM balances WHERE account_id = {debit_account_id} FOR UPDATE;')
+                    logging.debug(sql)
+                    results = self.connection.execute(sql)
+                    debit_account_balance = results.first()[0]
 
-            debit_new_balance = debit_account_balance - amount
-            sql = text(f'UPDATE balances SET balance={debit_new_balance} WHERE account_id = {debit_account_id};')
-            logging.debug(sql)
-            self.connection.execute(sql)
+                    debit_new_balance = debit_account_balance - amount
+                    sql = text(f'UPDATE balances SET balance={debit_new_balance} WHERE account_id = {debit_account_id};')
+                    logging.debug(sql)
+                    self.connection.execute(sql)
 
-        # FIXME:
-        # you need to update the credit account balance as well
+                # FIXME:
+                # you need to update the credit account balance as well
 
-        # update the credit account balance
-            sql = text(f'SELECT balance FROM balances WHERE account_id = {credit_account_id};')
-            logging.debug(sql)
-            results = self.connection.execute(sql)
-            credit_account_balance = results.first()[0]
+                # update the credit account balance
+                    sql = text(f'SELECT balance FROM balances WHERE account_id = {credit_account_id} FOR UPDATE;')
+                    logging.debug(sql)
+                    results = self.connection.execute(sql)
+                    credit_account_balance = results.first()[0]
 
-            credit_new_balance = credit_account_balance + amount
-            sql = text(f'UPDATE balances SET balance={credit_new_balance} WHERE account_id = {credit_account_id};')
-            logging.debug(sql)
-            self.connection.execute(sql)
+                    credit_new_balance = credit_account_balance + amount
+                    sql = text(f'UPDATE balances SET balance={credit_new_balance} WHERE account_id = {credit_account_id};')
+                    logging.debug(sql)
+                    self.connection.execute(sql)
+                return
+            except sqlalchemy.exc.OperationalError as exc:
+                sqlstate = getattr(exc.orig, 'sqlstate', None)
+                if sqlstate is None:
+                    sqlstate = getattr(exc.orig, 'pgcode', None)
+                if sqlstate != '40P01':
+                    raise
+                # Deadlock: transaction rolled back; retry the whole transfer.
